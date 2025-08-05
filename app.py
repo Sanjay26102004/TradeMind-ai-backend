@@ -176,5 +176,8 @@ def predict():
 def home():
     return "TradeMind AI Backend is Live!"
 
-if __name__ == '__main__':
+# --- Gunicorn binding fix ---
+if __name__ != '__main__':
+    gunicorn_app = app
+else:
     app.run(debug=True)
