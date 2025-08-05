@@ -2,9 +2,9 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 import json
 import os
-from datetime import datetime
-import time
 import random
+import time
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 CORS(app)
@@ -12,9 +12,19 @@ CORS(app)
 # Global Prediction Lock
 prediction_locks = {}
 
+# Mock Data: Pairs & Strategy Implementations
+PAIRS_STRATEGIES = {
+    'EUR/USD': 8,
+    'GBP/USD': 10,
+    'USD/JPY': 6,
+    'AUD/USD': 9,
+    'USD/CAD': 7
+}
+
+TOTAL_STRATEGIES = 10  # Total strategies in your system
+
 # --- Prediction Logic Function ---
 def predict_next_candle(pair, timeframe, candle_data, previous_candles):
-    # Dummy checklist (replace with real logic later)
     checklist = {
         "Near Key Level": random.choice([True, False]),
         "Domination Candle": random.choice([True, False]),
@@ -32,12 +42,10 @@ def predict_next_candle(pair, timeframe, candle_data, previous_candles):
 
     checklist_score = (sum(checklist.values()) / len(checklist)) * 100
 
-    # Only predict if checklist score >= 80%
     if checklist_score < 80:
         return None, checklist, checklist_score
 
     prediction = random.choice(["CALL", "PUT"])  # Dummy logic
-
     return prediction, checklist, checklist_score
 
 # --- Trade Logger ---
@@ -55,8 +63,8 @@ def analyze_trade_error(log_entry):
     if log_entry['actual_outcome'] != 'LOSS':
         return None
 
-    failed_conditions = [key for key, value in log_entry['checklist'].items() if value is False]
-    passed_conditions = [key for key, value in log_entry['checklist'].items() if value is True]
+    failed_conditions = [key for key, value in log_entry['checklist'].items() if not value]
+    passed_conditions = [key for key, value in log_entry['checklist'].items() if value]
 
     analysis = {
         "failed_conditions": failed_conditions,
@@ -79,11 +87,25 @@ def analyze_trade_error(log_entry):
 
     if not analysis['primary_reason']:
         analysis['primary_reason'] = 'Market Noise or External Factor'
-        analysis['suggestions'].append('Consider checking economic calendar for news events.')
+        analysis['suggestions'].append('Check economic calendar for news events.')
 
     return analysis
 
-# --- API Route ---
+# --- API Route: Get Eligible Pairs ---
+@app.route('/get_pairs', methods=['POST'])
+def get_pairs():
+    data = request.json
+    timeframe = data.get('timeframe', '')
+
+    eligible_pairs = []
+    for pair, implemented_strategies in PAIRS_STRATEGIES.items():
+        checklist_score = int((implemented_strategies / TOTAL_STRATEGIES) * 100)
+        if checklist_score >= 80:
+            eligible_pairs.append(pair)
+
+    return jsonify({'pairs': eligible_pairs})
+
+# --- API Route: Predict Candle ---
 @app.route('/predict', methods=['POST'])
 def predict():
     data = request.json
@@ -93,25 +115,37 @@ def predict():
     previous_candles = data.get('previous_candles', [])
     actual_outcome = data.get('actual_outcome', None)
 
+    # Candle Locking Logic
+    timeframe_seconds = {'30s': 30, '1m': 60, '5m': 300}.get(timeframe, 60)
     current_time = datetime.utcnow()
-    candle_key = f"{pair}_{timeframe}"
-    candle_minute = current_time.minute // int(timeframe) * int(timeframe)
-    candle_id = f"{current_time.strftime('%Y-%m-%d_%H')}_{candle_minute}"
+    candle_start_time = current_time - timedelta(seconds=current_time.second % timeframe_seconds, microseconds=current_time.microsecond)
+    candle_lock_expiry = candle_start_time + timedelta(seconds=timeframe_seconds)
+    lock_key = f"{pair}_{timeframe}"
 
-    # Check if prediction for this candle is already given
-    if prediction_locks.get(candle_key) == candle_id:
-        return jsonify({"status": "locked", "message": "Prediction already given for current candle."})
+    if lock_key in prediction_locks and prediction_locks[lock_key] > current_time:
+        return jsonify({
+            'status': 'locked',
+            'message': 'Prediction already made for this candle.',
+            'lockDuration': (prediction_locks[lock_key] - current_time).seconds
+        })
 
-    # Lock prediction for this candle
-    prediction_locks[candle_key] = candle_id
+    prediction_locks[lock_key] = candle_lock_expiry
 
-    # Simulate delay of 5 seconds to mimic real-time processing
-    time.sleep(5)
+    # Simulate Processing Delay (5 sec)
+    elapsed_since_candle_start = (current_time - candle_start_time).seconds
+    if elapsed_since_candle_start < 5:
+        time.sleep(5 - elapsed_since_candle_start)
 
+    # Run Prediction Logic
     prediction, checklist, checklist_score = predict_next_candle(pair, timeframe, candle_data, previous_candles)
 
     if not prediction:
-        return jsonify({"status": "no_trade", "message": "Checklist accuracy below 80%.", "checklist_score": checklist_score, "checklist": checklist})
+        return jsonify({
+            "status": "no_trade",
+            "message": "Checklist accuracy below 80%.",
+            "checklist_score": checklist_score,
+            "checklist": checklist
+        })
 
     log_entry = {
         "timestamp": current_time.isoformat(),
@@ -134,8 +168,13 @@ def predict():
         "prediction": prediction,
         "checklist": checklist,
         "checklist_score": checklist_score,
-        "error_analysis": error_analysis
+        "error_analysis": error_analysis,
+        "lockDuration": (candle_lock_expiry - current_time).seconds
     })
+
+@app.route('/')
+def home():
+    return "TradeMind AI Backend is Live!"
 
 if __name__ == '__main__':
     app.run(debug=True)
